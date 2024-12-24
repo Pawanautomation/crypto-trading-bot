@@ -1,7 +1,12 @@
 # Environment files
 .env
-.env.*
-*.env
+.env.development
+.env.production
+.env.local
+.env.backup
+
+# But allow the example template
+!.env.example
 
 # Python
 __pycache__/
