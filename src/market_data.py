@@ -1,56 +1,57 @@
 from binance import Client
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
+from .websocket_manager import BinanceWebsocketManager
 from config.config import Config
 
 class MarketDataManager:
     def __init__(self):
-        # Initialize Binance client (we'll use it for market data only)
+        """Initialize market data manager with websocket support"""
         self.client = Client("", "")  # No keys needed for public data
+        self.ws_manager = BinanceWebsocketManager()
         self.cached_data = {}
         self.last_update = None
         
-    async def get_market_data(self, symbol: str = "BTCUSDT") -> Dict[str, Any]:
-        """
-        Get current market data including price, volume, and indicators
-        """
+    async def start(self):
+        """Start websocket connection"""
+        await self.ws_manager.start()
+        await self.ws_manager.subscribe_symbols(Config.TRADING_PAIRS)
+        
+    async def stop(self):
+        """Stop websocket connection"""
+        await self.ws_manager.stop()
+        
+    def add_price_callback(self, callback):
+        """Add callback for price updates"""
+        self.ws_manager.add_callback(callback)
+        
+    async def get_market_data(self, symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
+        """Get current market data including price, volume, and indicators"""
         try:
-            current_time = datetime.now()
+            # Get live price data from websocket
+            live_price = self.ws_manager.get_latest_price(symbol)
             
-            # Check if cache is valid (less than 1 minute old)
-            if (self.last_update and 
-                current_time - self.last_update < timedelta(minutes=1) and
-                symbol in self.cached_data):
-                return self.cached_data[symbol]
-
-            # Get current ticker data
-            ticker = self.client.get_ticker(symbol=symbol)
-            
-            # Get recent klines (candlestick data)
+            if not live_price:
+                logging.warning(f"No live price available for {symbol}")
+                return None
+                
+            # Get recent klines for technical analysis
             klines = self.client.get_klines(
                 symbol=symbol,
                 interval=Client.KLINE_INTERVAL_1HOUR,
                 limit=24
             )
             
-            # Calculate basic indicators
+            # Combine live data with technical analysis
             market_data = {
                 'symbol': symbol,
-                'current_price': float(ticker['lastPrice']),
-                'price_change_24h': float(ticker['priceChangePercent']),
-                'volume_24h': float(ticker['volume']),
-                'high_24h': float(ticker['highPrice']),
-                'low_24h': float(ticker['lowPrice']),
-                'timestamp': current_time.isoformat(),
+                'current_price': live_price,
+                'timestamp': datetime.now().isoformat(),
                 'trend': self._calculate_trend(klines),
                 'volatility': self._calculate_volatility(klines),
                 'indicators': self._calculate_indicators(klines)
             }
-            
-            # Update cache
-            self.cached_data[symbol] = market_data
-            self.last_update = current_time
             
             return market_data
             
@@ -59,13 +60,11 @@ class MarketDataManager:
             return None
     
     def _calculate_trend(self, klines: list) -> str:
-        """
-        Calculate current trend based on recent prices
-        """
+        """Calculate current trend based on recent prices"""
         if not klines or len(klines) < 2:
             return "neutral"
             
-        recent_closes = [float(k[4]) for k in klines[-6:]]  # Last 6 hours
+        recent_closes = [float(k[4]) for k in klines[-6:]]
         first_price = recent_closes[0]
         last_price = recent_closes[-1]
         
@@ -78,13 +77,11 @@ class MarketDataManager:
         return "neutral"
     
     def _calculate_volatility(self, klines: list) -> float:
-        """
-        Calculate recent volatility
-        """
+        """Calculate recent volatility"""
         if not klines or len(klines) < 2:
             return 0.0
             
-        recent_prices = [float(k[4]) for k in klines[-12:]]  # Last 12 hours
+        recent_prices = [float(k[4]) for k in klines[-12:]]
         price_changes = [
             abs((recent_prices[i] - recent_prices[i-1]) / recent_prices[i-1] * 100)
             for i in range(1, len(recent_prices))
@@ -93,10 +90,8 @@ class MarketDataManager:
         return sum(price_changes) / len(price_changes)
     
     def _calculate_indicators(self, klines: list) -> Dict[str, float]:
-        """
-        Calculate basic technical indicators
-        """
-        if not klines or len(klines) < 14:  # Need at least 14 periods for RSI
+        """Calculate technical indicators"""
+        if not klines or len(klines) < 14:
             return {}
             
         closes = [float(k[4]) for k in klines]
@@ -108,28 +103,20 @@ class MarketDataManager:
         }
     
     def _calculate_sma(self, prices: list, period: int) -> float:
-        """
-        Calculate Simple Moving Average
-        """
+        """Calculate Simple Moving Average"""
         if len(prices) < period:
             return 0.0
         return sum(prices[-period:]) / period
     
     def _calculate_rsi(self, prices: list, period: int = 14) -> float:
-        """
-        Calculate Relative Strength Index
-        """
+        """Calculate Relative Strength Index"""
         if len(prices) < period + 1:
             return 50.0
             
-        # Calculate price changes
         deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-        
-        # Separate gains and losses
         gains = [d if d > 0 else 0 for d in deltas]
         losses = [-d if d < 0 else 0 for d in deltas]
         
-        # Calculate average gains and losses
         avg_gain = sum(gains[-period:]) / period
         avg_loss = sum(losses[-period:]) / period
         
@@ -140,32 +127,3 @@ class MarketDataManager:
         rsi = 100 - (100 / (1 + rs))
         
         return round(rsi, 2)
-
-    async def get_historical_data(self, symbol: str = "BTCUSDT", 
-                                days: int = 7) -> list:
-        """
-        Get historical price data
-        """
-        try:
-            end_time = datetime.now()
-            start_time = end_time - timedelta(days=days)
-            
-            klines = self.client.get_historical_klines(
-                symbol=symbol,
-                interval=Client.KLINE_INTERVAL_1HOUR,
-                start_str=start_time.strftime('%Y-%m-%d %H:%M:%S'),
-                end_str=end_time.strftime('%Y-%m-%d %H:%M:%S')
-            )
-            
-            return [{
-                'timestamp': datetime.fromtimestamp(k[0] / 1000).isoformat(),
-                'open': float(k[1]),
-                'high': float(k[2]),
-                'low': float(k[3]),
-                'close': float(k[4]),
-                'volume': float(k[5])
-            } for k in klines]
-            
-        except Exception as e:
-            logging.error(f"Error fetching historical data: {str(e)}")
-            return []
