@@ -1,52 +1,62 @@
 from binance import Client
 import logging
-from typing import Dict, Any, Optional
-from datetime import datetime, timedelta
+from typing import Dict, Any, Optional, List
+from datetime import datetime
 from .websocket_manager import BinanceWebsocketManager
 from config.config import Config
 
 class MarketDataManager:
     def __init__(self):
-        """Initialize market data manager with websocket support"""
+        """Initialize market data manager"""
         self.client = Client("", "")  # No keys needed for public data
         self.ws_manager = BinanceWebsocketManager()
         self.cached_data = {}
-        self.last_update = None
         
     async def start(self):
-        """Start websocket connection"""
-        await self.ws_manager.start()
-        await self.ws_manager.subscribe_symbols(Config.TRADING_PAIRS)
-        
+        """Start market data services"""
+        try:
+            await self.ws_manager.start()
+            if hasattr(Config, 'TRADING_PAIRS'):
+                await self.ws_manager.subscribe_symbols(Config.TRADING_PAIRS)
+            else:
+                await self.ws_manager.subscribe_symbols(["BTCUSDT", "ETHUSDT"])
+        except Exception as e:
+            logging.error(f"Error starting market data services: {str(e)}")
+            raise
+            
     async def stop(self):
-        """Stop websocket connection"""
-        await self.ws_manager.stop()
-        
+        """Stop market data services"""
+        try:
+            await self.ws_manager.stop()
+        except Exception as e:
+            logging.error(f"Error stopping market data services: {str(e)}")
+            raise
+            
     def add_price_callback(self, callback):
         """Add callback for price updates"""
         self.ws_manager.add_callback(callback)
-        
+
     async def get_market_data(self, symbol: str = "BTCUSDT") -> Optional[Dict[str, Any]]:
         """Get current market data including price, volume, and indicators"""
         try:
-            # Get live price data from websocket
-            live_price = self.ws_manager.get_latest_price(symbol)
+            # Get live price from websocket
+            current_price = self.ws_manager.get_latest_price(symbol)
             
-            if not live_price:
-                logging.warning(f"No live price available for {symbol}")
-                return None
-                
-            # Get recent klines for technical analysis
+            # If no websocket price, fall back to REST API
+            if current_price is None:
+                ticker = self.client.get_ticker(symbol=symbol)
+                current_price = float(ticker['lastPrice'])
+            
+            # Get candlestick data for technical analysis
             klines = self.client.get_klines(
                 symbol=symbol,
                 interval=Client.KLINE_INTERVAL_1HOUR,
                 limit=24
             )
             
-            # Combine live data with technical analysis
             market_data = {
                 'symbol': symbol,
-                'current_price': live_price,
+                'current_price': current_price,
                 'timestamp': datetime.now().isoformat(),
                 'trend': self._calculate_trend(klines),
                 'volatility': self._calculate_volatility(klines),
@@ -58,7 +68,7 @@ class MarketDataManager:
         except Exception as e:
             logging.error(f"Error fetching market data: {str(e)}")
             return None
-    
+            
     def _calculate_trend(self, klines: list) -> str:
         """Calculate current trend based on recent prices"""
         if not klines or len(klines) < 2:
@@ -75,7 +85,7 @@ class MarketDataManager:
         elif price_change < -1:
             return "bearish"
         return "neutral"
-    
+            
     def _calculate_volatility(self, klines: list) -> float:
         """Calculate recent volatility"""
         if not klines or len(klines) < 2:
@@ -88,7 +98,7 @@ class MarketDataManager:
         ]
         
         return sum(price_changes) / len(price_changes)
-    
+            
     def _calculate_indicators(self, klines: list) -> Dict[str, float]:
         """Calculate technical indicators"""
         if not klines or len(klines) < 14:
@@ -101,15 +111,13 @@ class MarketDataManager:
             'rsi_14': self._calculate_rsi(closes, 14),
             'price_vs_sma': (closes[-1] / self._calculate_sma(closes, 20) - 1) * 100
         }
-    
+            
     def _calculate_sma(self, prices: list, period: int) -> float:
-        """Calculate Simple Moving Average"""
         if len(prices) < period:
             return 0.0
         return sum(prices[-period:]) / period
-    
+            
     def _calculate_rsi(self, prices: list, period: int = 14) -> float:
-        """Calculate Relative Strength Index"""
         if len(prices) < period + 1:
             return 50.0
             
